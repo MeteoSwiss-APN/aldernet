@@ -1,0 +1,10 @@
+Package: realtime.calibration
+Title: Verification of the Machine Learning Model for Surface Level Alder Pollen.
+Version: 1.0.0
+Authors@R:
+    person("Simon", "Adamov", , "simon.adamov@meteoswiss.ch", role = c("aut", "cre"))
+Description: Statistical Analysis of Measured and Modelled Pollen Surface Concentrations to evaluate the calibration module using realtime data.
+License: GPL (>= 3)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.2

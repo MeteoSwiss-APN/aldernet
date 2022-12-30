@@ -1,0 +1,19 @@
+XLS_TABLE 1.5
+Description: ATAB
+Type_of_product: cosmo_determinist
+Experiment: 322
+Start_time: 2022-02-17 8:00 +0:00
+End_time: 2022-02-22 7:00 +0:00
+Missing_value_code: -99999.
+Width_of_text_label_column: 10
+Number_of_integer_label_columns: 7
+Number_of_real_label_columns: 0
+Number_of_data_columns: 14
+Number_of_data_rows: 120
+Indicator: PBS PBE PBU PDS PGE PCF PLS PLO PLU PLZ PMU PNE PVI PZH
+Longitude: 7.599 7.422 9.470 9.854 6.142 6.840 6.641 8.787 8.949 8.282 9.243 6.949 7.872 8.568
+Latitude: 47.565 46.941 47.179 46.820 46.194 47.117 46.530 46.173 46.015 47.067 47.628 47.000 46.300 47.371
+Grid_i: 525 511 651 677 420 472 456 603 614 570 636 479 540 590
+Grid_j: 506 444 465 429 373 463 405 365 349 455 510 451 379 485
+Height: 261.9 557.6 441.4 1661.9 387.4 1040.9 590.5 389.7 282.6 465.0 415.4 485.7 739.0 547.5
+PARAMETER LTYPE LEVEL YYYY MM DD hh LT_h PBS PBE PBU PDS PGE PCF PLS PLO PLU PLZ PMU PNE PVI PZH

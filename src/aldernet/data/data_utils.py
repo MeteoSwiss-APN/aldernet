@@ -69,14 +69,9 @@ class Batcher(tf.keras.utils.Sequence):
     def on_epoch_end(self):
         """Update indexes after each epoch."""
         if self.shuffle is True:
-            shuffle_x = self.x.values
-            np.random.shuffle(shuffle_x)
-            self.x.values = shuffle_x
-            shuffle_y = self.y.values
-            np.random.shuffle(shuffle_y)
-            self.y.values = shuffle_y
+            idx = np.random.permutation(len(self.x.values))
+            self.x.values = self.x.values[idx]
+            self.y.values = self.y.values[idx]
             if self.add_weather:
-                shuffle_weather = self.weather.values
-                np.random.shuffle(shuffle_weather)
-                self.weather.values = shuffle_weather
+                self.weather.values = self.weather.values[idx]
             print("Data Reshuffled!", flush=True)

@@ -8,7 +8,7 @@ import socket
 # Third-party
 import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
-import torch
+import torch  # type: ignore
 import xarray as xr
 from denoising_diffusion_pytorch import GaussianDiffusion  # type: ignore
 from denoising_diffusion_pytorch import Unet  # type: ignore
@@ -22,16 +22,20 @@ def show(img):
 zoom = ""
 hostname = socket.gethostname()
 if "tsa" in hostname:
-    data_train = xr.open_zarr("/scratch/sadamov/aldernet/" + zoom + "/data_train.zarr")
-    data_valid = xr.open_zarr("/scratch/sadamov/aldernet/" + zoom + "/data_valid.zarr")
+    data_train = xr.open_zarr(
+        "/scratch/sadamov/pyprojects_data/aldernet/" + zoom + "/data_train.zarr"
+    )
+    data_valid = xr.open_zarr(
+        "/scratch/sadamov/pyprojects_data/aldernet/" + zoom + "/data_valid.zarr"
+    )
 elif "nid" in hostname:
     data_train = xr.open_zarr(
-        "/scratch/e1000/meteoswiss/scratch/sadamov/aldernet/"
+        "/scratch/e1000/meteoswiss/scratch/sadamov/pyprojects_data/aldernet/"
         + zoom
         + "/data_train.zarr"
     )
     data_valid = xr.open_zarr(
-        "/scratch/e1000/meteoswiss/scratch/sadamov/aldernet/"
+        "/scratch/e1000/meteoswiss/scratch/sadamov/pyprojects_data/aldernet/"
         + zoom
         + "/data_valid.zarr"
     )

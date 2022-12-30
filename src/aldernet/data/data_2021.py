@@ -9,7 +9,7 @@ import glob
 import cfgrib  # type: ignore
 
 # Remove existing zarr archive
-# os.system("rm -r /scratch/sadamov/aldernet/data2021")
+# os.system("rm -r /scratch/sadamov/pyprojects_data/aldernet/data2021")
 
 # Variables to be extracted from surface-level GRIB file
 # Unfortunately, all variables have to be read first (metadata only - lazily),
@@ -131,7 +131,7 @@ if initialize:
     keys.sort()
     ds_surface = ds_surface[keys]
 
-    ds_surface.to_zarr("/scratch/sadamov/aldernet/data2021")
+    ds_surface.to_zarr("/scratch/sadamov/pyprojects_data/aldernet/data2021")
 
 for file_weather, file_cory, file_alnu in zip(
     files_weather[1:], files_cory[1:], files_alnu[1:]
@@ -210,5 +210,7 @@ for file_weather, file_cory, file_alnu in zip(
     ds_surface = ds_surface[keys]
 
     ds_surface.to_zarr(
-        "/scratch/sadamov/aldernet/data2021", mode="a", append_dim="valid_time"
+        "/scratch/sadamov/pyprojects_data/aldernet/data2021",
+        mode="a",
+        append_dim="valid_time",
     )

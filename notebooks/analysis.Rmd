@@ -1,0 +1,1303 @@
+---
+title: "Verification of the Machine Learning Model for Surface Level Alnus (Alder) Pollen"
+author: "Simon Adamov"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+always_allow_html: TRUE
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+In this notebook we evaluate the Alnus pollen forecast with a Deep Learning model.
+The notebook is an adjusted version of the one used for this
+[paper](https://github.com/MeteoSwiss-APN/realtime_calibration.git), and might still
+contain some legacy code and comments as a consequence.
+The ML model is compared to three other timeseries during the same period:
+
+- Kenda hourly analysis (COSMO-1E) for pollen target species (e.g. Alnus)
+- Kenda hourly analysis (COSMO-1E) for pollen input species (e.g. Corylus): Simply assuming that both species follow the
+  exact same distribution and flowering patterns
+- Alnus pollen measurements (2022 with the automatic Poleno monitors, 2020-2021 with Hirst traps)
+
+Verification of the model happens exclusively at the station level so far, as no spatial
+verification method has been widely accepted in the pollen community.
+Pollen surface level concentrations (i.e. level k=80 in Cosmo) are evaluated.
+
+```{r include=FALSE}
+library(readr)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(stringr)
+library(magrittr)
+library(padr)
+library(kableExtra)
+library(purrr)
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(ggtext)
+library(here)
+library(lubridate)
+library(caret)
+library(psych)
+library(scales)
+library(nparcomp)
+
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("date", "lubridate")
+```
+
+```{r include=FALSE}
+# Main colors for the analysis
+theme_set(theme_minimal(base_size = 12))
+col_names <- c("measurement", "cosmo_input", "cosmo_target", "ml")
+col_hex <- c("#534747cb", "#ffbe31c7", "#33d491d7", "#4c55d6e0")
+names(col_hex) <- col_names
+```
+
+```{r include=FALSE}
+datapath <- paste0(here(), "/data/pollen_ml.atab")
+data_ml_raw <- read_csv(paste(datapath), col_names = TRUE)
+year_selected <- year(data_ml_raw$datetime[1])
+species_selected <- data_ml_raw$taxon[1]
+```
+
+```{r include=FALSE}
+load(paste0(here(), "/data/species.RData"))
+load(paste0(here(), "/data/stations.RData"))
+```
+
+```{r include=FALSE}
+cols <- c("station", "type", "value", "datetime")
+stn_start <- "PLO"
+stn_end <- "PCF"
+meas <- "concentration"
+stn_abbr <- "hirst_station"
+cols <- c("taxon", cols)
+datapath <- paste0(here(), "/data/", str_sub(year_selected, 3, 4), "_alnu_dwh.atab")
+data_dwh <- read_table(paste(datapath), skip = 17) %>%
+  pivot_longer({{ stn_start }}:{{ stn_end }},
+    names_to = "station_short", values_to = "value"
+  ) %>%
+  mutate(
+    value = if_else(value == -9999, NA_real_, value),
+    type = "measurement",
+    measurement = meas,
+    datetime = ymd_h(paste0(
+      YYYY, sprintf("%02d", MM),
+      sprintf("%02d", DD),
+      sprintf("%02d", HH)
+    ))
+  ) %>%
+  inner_join(species, by = c("PARAMETER" = "cosmo_taxon")) %>%
+  inner_join(stations, by = c("station_short" = stn_abbr)) %>%
+  select(all_of(cols)) %>%
+  filter(taxon == species_selected & between(
+    datetime,
+    ymd_hms(paste0(year_selected, "-02-09 00:00:00")),
+    ymd_hms(paste0(year_selected, "-03-31 23:00:00"))
+  )) %>%
+  mutate(date = lubridate::date(datetime)) %>%
+  group_by(taxon, station, date, type) %>%
+  summarise(
+    nas = sum(is.na(value)),
+    value = if_else(nas <= 12, mean(value, na.rm = TRUE), NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    datetime = ymd_hms(paste0(
+      as.character(date),
+      "00:00:00"
+    ))
+  ) %>%
+  select(-date, -nas) %>%
+  group_split(taxon, year(datetime)) %>%
+  map(~ .x %>%
+    pad(
+      group = c("station", "taxon", "type"),
+      by = "datetime",
+      break_above = 2
+    )) %>%
+  bind_rows() %>%
+  select(taxon, station, type, value, datetime)
+```
+
+```{r include=FALSE}
+
+datapath <- paste0(here(), "/data/", str_sub(year_selected, 3, 4), "_alnu_cosmo.atab")
+data_cosmo_input <- read_table(paste(datapath), col_names = TRUE, skip = 18) %>%
+  pivot_longer(PBS:PZH,
+    names_to = "station_tag",
+    values_to = "value"
+  ) %>%
+  mutate(type = "cosmo_input") %>%
+  inner_join(species, by = c("PARAMETER" = "cosmo_taxon")) %>%
+  inner_join(stations, by = c("station_tag" = "hirst_station")) %>%
+  mutate(
+    datetime = ymd_h(paste0(
+      YYYY, sprintf("%02d", MM),
+      sprintf("%02d", DD),
+      sprintf("%02d", hh)
+    )),
+    type = type
+  ) %>%
+  select(taxon, station, datetime, value, type) %>%
+  filter(taxon == species_selected & between(
+    datetime,
+    ymd_hms(paste0(year_selected, "-02-09 00:00:00")),
+    ymd_hms(paste0(year_selected, "-03-31 23:00:00"))
+  )) %>%
+  mutate(date = lubridate::date(datetime)) %>%
+  group_by(taxon, station, date, type) %>%
+  summarise(
+    nas = sum(is.na(value)),
+    value = if_else(nas <= 12, mean(value, na.rm = TRUE), NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    datetime = ymd_hms(paste0(
+      as.character(date),
+      "00:00:00"
+    ))
+  ) %>%
+  select(-date, -nas) %>%
+  group_split(taxon, year(datetime)) %>%
+  map(~ .x %>%
+    pad(
+      group = c("station", "taxon", "type"),
+      by = "datetime",
+      break_above = 2
+    )) %>%
+  bind_rows() %>%
+  select(taxon, station, type, value, datetime)
+```
+
+
+```{r include=FALSE}
+
+datapath <- paste0(here(), "/data/", str_sub(year_selected, 3, 4), "_cory_cosmo.atab")
+data_cosmo_target <- read_table(paste(datapath), col_names = TRUE, skip = 18) %>%
+  pivot_longer(PBS:PZH,
+    names_to = "station_tag",
+    values_to = "value"
+  ) %>%
+  mutate(type = "cosmo_target") %>%
+  inner_join(species, by = c("PARAMETER" = "cosmo_taxon")) %>%
+  inner_join(stations, by = c("station_tag" = "hirst_station")) %>%
+  mutate(
+    datetime = ymd_h(paste0(
+      YYYY, sprintf("%02d", MM),
+      sprintf("%02d", DD),
+      sprintf("%02d", hh)
+    )),
+    type = type,
+    taxon = species_selected
+  ) %>%
+  select(taxon, station, datetime, value, type) %>%
+  filter(taxon == species_selected & between(
+    datetime,
+    ymd_hms(paste0(year_selected, "-02-09 00:00:00")),
+    ymd_hms(paste0(year_selected, "-03-31 23:00:00"))
+  )) %>%
+  mutate(date = lubridate::date(datetime)) %>%
+  group_by(taxon, station, date, type) %>%
+  summarise(
+    nas = sum(is.na(value)),
+    value = if_else(nas <= 12, mean(value, na.rm = TRUE), NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    datetime = ymd_hms(paste0(
+      as.character(date),
+      "00:00:00"
+    ))
+  ) %>%
+  select(-date, -nas) %>%
+  group_split(taxon, year(datetime)) %>%
+  map(~ .x %>%
+    pad(
+      group = c("station", "taxon", "type"),
+      by = "datetime",
+      break_above = 2
+    )) %>%
+  bind_rows() %>%
+  select(taxon, station, type, value, datetime)
+```
+
+```{r include=FALSE}
+
+data_ml <- data_ml_raw %>%
+  pivot_longer(PBS:PZH,
+    names_to = "station_tag",
+    values_to = "value"
+  ) %>%
+  mutate(type = "ml") %>%
+  inner_join(stations, by = c("station_tag" = "hirst_station")) %>%
+  select(taxon, station, datetime, value, type) %>%
+  filter(between(
+    datetime,
+    ymd_hms(paste0(year_selected, "-02-09 00:00:00")),
+    ymd_hms(paste0(year_selected, "-03-31 23:00:00"))
+  )) %>%
+  mutate(date = lubridate::date(datetime)) %>%
+  group_by(taxon, station, date, type) %>%
+  summarise(
+    nas = sum(is.na(value)),
+    value = if_else(nas <= 12, mean(value, na.rm = TRUE), NA_real_)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    datetime = ymd_hms(paste0(
+      as.character(date),
+      "00:00:00"
+    ))
+  ) %>%
+  select(-date, -nas) %>%
+  group_split(taxon, year(datetime)) %>%
+  map(~ .x %>%
+    pad(
+      group = c("station", "taxon", "type"),
+      by = "datetime",
+      break_above = 2
+    )) %>%
+  bind_rows() %>%
+  select(taxon, station, type, value, datetime) %>%
+  mutate(value = 13 * value)
+```
+
+## The Data
+
+The observations are provided at 9-14 different stations (depending on the season),
+whereof one is excluded from the analysis:
+Davos is high up in the mountains and pollen measurements are almost always zero.
+
+The following settings are crucial and should always be remembered when running the chunks below:
+
+- The temporal resolution for this analysis is daily averages - pollen verification can be sensitive to temporal resolution
+- The threshold below which Pollen measurements are excluded from the data is set to 10.
+  The old Hirst trap measurements become unreliable below this threshold.
+
+Observations of low pollen concentrations are uncertain. Therefore, times-
+tamps with modelled or measured values < 10 m-3 are removed from all three
+data sets for the numerical analysis. This symmetrical exclusion is necessary to
+make sure that no artificial biases are introduced. For the analyses carried out for
+specific health impact based categories (i.e. concentration bins), timestamps with
+measured values < 10 m-3 are removed only (i.e. modelled values are allowed
+to be < 10 m-3. This asymmetrical exclusion is justified for the investigation of
+relative changes in categorical metrics. In the time series plot (Figure 1) and the
+boxplot (Figure 5) values < 10 are not removed at all for better visibility.
+Whether low values <10 were removed are not will be denoted in all figure captions and
+should allow the reader to get a full picture of the data.
+
+
+```{r include=FALSE}
+data_combined <- data_dwh %>%
+  pivot_wider(names_from = type) %>%
+  inner_join(data_cosmo_input %>%
+    pivot_wider(names_from = type), by = c("taxon", "station", "datetime")) %>%
+  inner_join(data_cosmo_target %>%
+    pivot_wider(names_from = type), by = c("taxon", "station", "datetime")) %>%
+  inner_join(data_ml %>%
+    pivot_wider(names_from = type), by = c("taxon", "station", "datetime")) %>%
+  # Remove timesteps with missing data in observations
+  filter(!is.na(measurement)) %>%
+  pivot_longer(measurement:ml, names_to = "type", values_to = "value") %>%
+  select(taxon, station, type, value, datetime) %>%
+  filter(
+    taxon == species_selected,
+    station != "Davos"
+  ) %>%
+  mutate(type = factor(type,
+    ordered = TRUE,
+    levels = c("measurement", "cosmo_input", "cosmo_target", "ml")
+  ))
+
+data_above10 <- data_combined %>%
+  pivot_wider(names_from = type) %>%
+  filter(measurement > 10, cosmo_input > 10, cosmo_target > 10, ml > 10) %>%
+  pivot_longer(measurement:ml, names_to = "type", values_to = "value") %>%
+  mutate(type = factor(type,
+    ordered = TRUE,
+    levels = c("measurement", "cosmo_input", "cosmo_target", "ml")
+  ))
+
+
+data_log10 <- data_above10 %>%
+  mutate(value = log10(value + 0.0001))
+
+data_altman <- data_above10 %>%
+  pivot_wider(names_from = type) %>%
+  select(datetime, measurement, cosmo_input, cosmo_target, ml) %>%
+  mutate(
+    mean_cosmo_input = (measurement + cosmo_input) / 2,
+    mean_cosmo_target = (measurement + cosmo_target) / 2,
+    mean_ml = (measurement + ml) / 2,
+    diff_cosmo_input = cosmo_input - measurement,
+    diff_cosmo_target = cosmo_target - measurement,
+    diff_ml = ml - measurement
+  )
+
+data_corr <- data_log10 %>%
+  pivot_wider(names_from = type) %>%
+  select(datetime, measurement, cosmo_input, cosmo_target, ml)
+
+data_impact_categories <- data_combined %>%
+  pivot_wider(names_from = type) %>%
+  mutate(
+    categories_measurement = case_when(
+      measurement < 1 ~ "nothing",
+      measurement >= 1 & measurement < 10 ~ "weak",
+      measurement >= 10 & measurement < 70 ~ "medium",
+      measurement >= 70 & measurement < 250 ~ "strong",
+      measurement >= 250 ~ "verystrong",
+    ),
+    categories_cosmo_input = case_when(
+      cosmo_input < 1 ~ "nothing",
+      cosmo_input >= 1 & cosmo_input < 10 ~ "weak",
+      cosmo_input >= 10 & cosmo_input < 70 ~ "medium",
+      cosmo_input >= 70 & cosmo_input < 250 ~ "strong",
+      cosmo_input >= 250 ~ "verystrong",
+    ),
+    categories_cosmo_target = case_when(
+      cosmo_target < 1 ~ "nothing",
+      cosmo_target >= 1 & cosmo_target < 10 ~ "weak",
+      cosmo_target >= 10 & cosmo_target < 70 ~ "medium",
+      cosmo_target >= 70 & cosmo_target < 250 ~ "strong",
+      cosmo_target >= 250 ~ "verystrong",
+    ),
+    categories_ml = case_when(
+      ml < 1 ~ "nothing",
+      ml >= 1 & ml < 10 ~ "weak",
+      ml >= 10 & ml < 70 ~ "medium",
+      ml >= 70 & ml < 250 ~ "strong",
+      ml >= 250 ~ "verystrong",
+    )
+  ) %>%
+  mutate_at(
+    vars(categories_measurement, categories_cosmo_input, categories_cosmo_target, categories_ml),
+    ~ factor(., levels = c("nothing", "weak", "medium", "strong", "verystrong"))
+  )
+
+data_impact_categories_above10 <- data_impact_categories %>%
+  filter(measurement > 10)
+```
+
+## Residual Analysis
+
+First we compare the three data sets with the traditional ANOVA approach. Statistical inference (p-values, confidence intervals, . . . )
+is only valid if the model assumptions are fulfilled. So far, this means (many paragraphs are quoted from Lukas Meier ETH - Script Applied Statistics ANOVA Course):
+
+- are the errors independent?
+- are the errors normally distributed?
+- is the error variance constant?
+- do the errors have mean zero?
+
+The first assumption is most crucial (but also most difficult to check). If the independence assumption is
+violated, statistical inference can be very inaccurate. In the ANOVA setting, the last assumption is typically
+not as important compared to a regression setting, as we are typically fitting “large” models.
+
+```{r include=FALSE}
+op <- options(contrasts = c("contr.sum", "contr.poly"))
+fit_anova <- aov(as.formula(paste("value ~ type")), data = data_above10)
+fit_anova_log <- aov(as.formula(paste("value ~ type")), data = data_log10)
+```
+
+### Are the errors normally distributed?
+
+In a QQ-plot we plot the empirical quantiles (“what we see in the data”) vs. the theoretical quantiles (“what
+we expect from the model”). The plot should show a more or less straight line if the distributional assumption
+is correct. By default, a standard normal distribution is the theoretical “reference distribution”.
+
+They are definitely not and we have to do some adjustments. So for the following plot we logarithmic the data to deal with the right-skewedness.
+The best results were achieved by first logarithmic the data and then taking the square root.
+
+```{r echo=FALSE}
+gg_res1 <- tibble(residuals = residuals(fit_anova_log, type = "pearson")) %>%
+  ggplot(aes(sample = residuals)) +
+  stat_qq(col = "#222225", alpha = 0.05) +
+  stat_qq_line(col = "#cc2d2d")
+
+gg_res2 <- tibble(residuals = residuals(fit_anova, type = "pearson")) %>%
+  ggplot(aes(sample = residuals), col = col_hex[3]) +
+  stat_qq(col = "#222225", alpha = 0.05) +
+  stat_qq_line(col = "#cc2d2d")
+
+ggarrange(gg_res1, gg_res2, nrow = 1) %>%
+  annotate_figure(top = "QQ-Plot for the ANOVA Residuals With (left) and Without Logarithmizing")
+```
+
+### Do the errors have mean zero? & Is the error variance constant?
+
+The Tukey-Anscombe plot plots the residuals vs. the fitted values.
+It allows us to check whether the residuals have constant variance and whether the residuals have mean zero
+(i.e. they don’t show any deterministic pattern).
+We don't plot the smoothing line as loess (and other) algorithms have issues when the same value is repeated a large number of times (jitter did not really help).
+
+```{r echo=FALSE}
+gg_tukey1 <- tibble(
+  resid = residuals(fit_anova_log, type = "pearson"),
+  fitted = fit_anova_log$fitted.values
+) %>%
+  ggplot(aes(x = fitted, y = resid)) +
+  geom_point(col = "#222225", alpha = 0.2, position = position_jitter(width = 5, height = 0)) +
+  # geom_smooth(method = "loess", alpha = 0.2, col = "#3081b8", fill = "#74cbee") +
+  geom_abline(slope = 0, intercept = 0, col = "#cc2d2d")
+gg_tukey2 <-
+  tibble(resid = residuals(fit_anova, type = "pearson"), fitted = fit_anova$fitted.values) %>%
+  ggplot(aes(x = fitted, y = resid)) +
+  geom_point(col = "#222225", alpha = 0.2, position = position_jitter(width = 5, height = 0)) +
+  # geom_smooth(method = "loess", alpha = 0.2, col = "#3081b8", fill = "#74cbee") +
+  geom_abline(slope = 0, intercept = 0, col = "#cc2d2d")
+
+ggarrange(gg_tukey1, gg_tukey2) %>%
+  annotate_figure(
+    top = "Tukey Anscombe - Plot for the ANOVA Residuals With (left) and Without Logarithmizing"
+  )
+```
+
+### Are the errors independent?
+
+If the data has some serial structure (i.e., if observations were recorded in a certain time order), we typically
+want to check whether residuals close in time are more similar than residuals far apart, as this would be a
+violation of the independence assumption. We can do so by using a so-called index plot where we plot the
+residuals against time. For positively dependent residuals we would see time periods where most residuals
+have the same sign, while for negatively dependent residuals, the residuals would “jump” too often from
+positive to negative compared to independent residuals.
+
+```{r echo=FALSE}
+resid <- residuals(fit_anova_log, type = "pearson")
+resid_df <- tibble(resid = resid, id = as.numeric(names(resid)))
+
+gg_timeline_log <- tibble(id = seq_len(nrow(data_log10)), time = data_log10$datetime) %>%
+  left_join(resid_df, by = "id") %>%
+  ggplot(aes(x = time, y = resid)) +
+  geom_point(alpha = 0.1, col = "#222225") +
+  geom_line(alpha = 0.1, col = "#222225") +
+  geom_abline(slope = 0, intercept = 0, col = "#cc2d2d")
+
+resid <- residuals(fit_anova, type = "pearson")
+resid_df <- tibble(resid = resid, id = as.numeric(names(resid)))
+
+gg_timeline <- tibble(id = seq_len(nrow(data_above10)), time = data_above10$datetime) %>%
+  left_join(resid_df, by = "id") %>%
+  ggplot(aes(x = time, y = resid)) +
+  geom_point(alpha = 0.1, col = "#222225") +
+  geom_line(alpha = 0.1, col = "#222225") +
+  geom_abline(slope = 0, intercept = 0, col = "#cc2d2d")
+
+start_date <- as.POSIXct("2022-02-09")
+
+end_date <- as.POSIXct("2022-03-31")
+
+
+gg_timeline_log1 <- gg_timeline_log + coord_cartesian(x = c(start_date, end_date))
+
+gg_timeline1 <- gg_timeline + coord_cartesian(x = c(start_date, end_date))
+
+ggarrange(gg_timeline_log1, gg_timeline1, ncol = 2) %>%
+  annotate_figure(top = "Index-Plot for the ANOVA Residuals With (left) and Without Logarithmizing")
+```
+
+Summary: Residual Analysis shows that the assumptions of "normal" statiscal methods are validated even for log(daily values).
+It is therefore suggested to continue the analysis with robust and simple metrics.
+
+## Visual Assessment
+
+### Basic Plots
+
+General overview of the daily concentration values as represented in the four timeseries.
+The separate lines represent concentrations at individual stations as measured or modelled
+in the year `r year_selected`.
+
+```{r echo=FALSE}
+startdate <- ymd_hms("2022-01-01 00:00:00")
+enddate <- ymd_hms("2022-03-31 00:00:00")
+
+(gg_timeseries <- data_combined %>%
+  ggplot() +
+  geom_line(aes(
+    x = as.Date(datetime), y = log10(value + 1),
+    col = type, group = station
+  ), alpha = 0.25) +
+  facet_wrap(~type, nrow = 3) +
+  theme(legend.position = "none") +
+  scale_color_manual("", values = col_hex) +
+  scale_x_date(date_labels = "%d. %b") +
+  xlab("") +
+  ylab(paste0("Daily Mean Log. Concentrations [Pollen / m³]")) +
+  ggtitle(paste0("Time Series of Daily ", "*", species_selected, "*", " Pollen Concentrations")) +
+  theme(plot.title = element_markdown()))
+```
+
+In this plot the reader can compare the Alnus pollen season at each station individually.
+
+```{r echo=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+startdate <- ymd_hms("2022-01-01 00:00:00")
+enddate <- ymd_hms("2022-03-31 00:00:00")
+
+(gg_timeseries_stn <- data_combined %>%
+  ggplot() +
+  geom_line(aes(
+    x = as.Date(datetime), y = value,
+    col = type,
+  ), alpha = 0.7) +
+  scale_color_manual("", values = col_hex) +
+  scale_x_date(date_labels = "%d. %b") +
+  xlab("") +
+  facet_wrap(~station) +
+  ylab(paste0("Daily Mean Log. Concentrations [Pollen / m³]")) +
+  ggtitle(paste0("Time Series of Daily ", "*", species_selected, "*", " Pollen Concentrations")) +
+  theme(plot.title = element_markdown()))
+```
+
+The overall distribution of the concentration values is shown in the following:
+First, as a boxplot and second as a histogram.
+
+```{r echo=FALSE}
+(gg_boxplot <- data_above10 %>%
+  ggplot() +
+  geom_boxplot(aes(y = value, fill = type), alpha = 0.9) +
+  theme(
+    legend.position = "bottom",
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  labs(y = paste0("Daily Mean Concentrations [Pollen / m³]", x = "")) +
+  coord_cartesian(y = c(0, 1000)) +
+  scale_fill_manual("", values = col_hex) +
+  ggtitle(paste0("Boxplot of Daily ", "*", species_selected, "*", " Pollen Concentrations")) +
+  theme(plot.title = ggtext::element_markdown()))
+```
+
+```{r echo=FALSE}
+sd_hirst <- data_above10 %>%
+  group_by(type) %>%
+  summarise(sd = sd(value))
+
+(gg_hist <- data_log10 %>%
+  ggplot() +
+  geom_histogram(
+    aes(
+      y = value,
+      fill = type
+    ),
+    binwidth = 0.1
+  ) +
+  geom_label(
+    data = sd_hirst,
+    aes(
+      label = paste("Standard Deviation:\n", round(sd), "Pollen / m³"),
+      x = 50,
+      y = 2.5,
+      group = type
+    ),
+    size = 3
+  ) +
+  # xlim(0, 100) +
+  facet_wrap(vars(type), ncol = 1) +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = col_hex) +
+  coord_flip() +
+  labs(x = "Occurrence of Pollen Concentrations", y = "Log Mean Conc. [Pollen / m³]") +
+  ggtitle(paste0("Histogram of Daily ", "*", species_selected, "*", " Pollen Concentrations")) +
+  theme(plot.title = ggtext::element_markdown()))
+```
+
+### Correlation Plots
+
+The correlation between the Model and Measurements can be calculated easily and then the CI and p-values must be adjusted for multiple comparison.
+The corr-test function from the psych handily offers this functionality.
+
+Careful the correlation coefficients method have some serious shortcomings:
+
+The correlation coefficient measures linear agreement--whether the measurements go up-and-down together.
+Certainly, we want the measures to go up-and-down together, but the correlation coefficient itself is
+deficient in at least three ways as a measure of agreement. (http://www.jerrydallal.com/LHSP/compare.htm)
+
+- The correlation coefficient can be close to 1 (or equal to 1!) even when there is considerable bias between the two methods. For example, if one method gives measurements that are always 10 units higher than the other method, the correlation will be 1 exactly, but the measurements will always be 10 units apart.
+- The magnitude of the correlation coefficient is affected by the range of subjects/units studied. The correlation coefficient can be made smaller by measuring samples that are similar to each other and larger by measuring samples that are very different from each other. The magnitude of the correlation says nothing about the magnitude of the differences between the paired measurements which, when you get right down to it, is all that really matters.
+- The usual significance test involving a correlation coefficient-- whether the population value is 0--is irrelevant to the comparability problem. What is important is not merely that the correlation coefficient be different from 0. Rather, it should be close to (ideally, equal to) 1!
+
+A good summary of the methods and their shortcomings can be found here: https://www.statisticssolutions.com/correlation-Pearson-Kendall-spearman/
+
+```{r include=FALSE}
+
+methods <- c("pearson", "spearman", "kendall")
+
+# For the robust methods (spearman, kendall)
+# it doesn't matter whether the transformed data is used or the original
+
+corr_matrix <- map(methods, ~ corr.test(
+  data_corr %>% select(-datetime),
+  use = "complete",
+  method = .x,
+  adjust = "holm",
+  alpha = .05,
+  ci = TRUE,
+  minlength = 5
+))
+```
+
+```{r include=FALSE}
+ci <- map(corr_matrix, ~ .x %>%
+  pluck(10)) %>%
+  bind_rows() %>%
+  round(2) %>%
+  mutate(
+    method = tools::toTitleCase(rep(methods, each = 6)),
+    metric = rep(c("R", "Rho", "Tau"), each = 6),
+    label = paste0(method, "~", metric, ": ", lower, " - ", upper),
+    comparison = rep(c("mi", "mt", "mml", "it", "iml", "tml"), times = 3),
+    x = rep(c(2.5, 2.55, 2.5), each = 6),
+    y = rep(c(1, 1.15, 1.3), each = 6)
+  )
+```
+
+```{r include=FALSE}
+gg_corr1 <- data_corr %>%
+  ggplot(aes(x = measurement, y = cosmo_input)) +
+  geom_point(alpha = 0.3, col = "#222225") +
+  xlim(1, 3) +
+  ylim(1, 3.5) +
+  geom_smooth(alpha = 0.2, col = "#3081b8", fill = "#74cbee") +
+  geom_abline(slope = 1, intercept = 0, col = "#cc2d2d") +
+  geom_label(
+    data = ci %>% filter(comparison == "mi"),
+    aes(label = label, x = x, y = y), parse = TRUE
+  ) +
+  xlab("log10(measurement)") +
+  ylab("log10(cosmo_input)")
+```
+
+```{r include=FALSE}
+gg_corr2 <- data_corr %>%
+  ggplot(aes(x = measurement, y = cosmo_target)) +
+  geom_point(alpha = 0.3, col = "#222225") +
+  xlim(1, 3) +
+  ylim(1, 3.5) +
+  geom_smooth(alpha = 0.2, col = "#3081b8", fill = "#74cbee") +
+  geom_abline(slope = 1, intercept = 0, col = "#cc2d2d") +
+  geom_label(
+    data = ci %>% filter(comparison == "mt"),
+    aes(label = label, x = x, y = y), parse = TRUE
+  ) +
+  xlab("log10(measurement)") +
+  ylab("log10(cosmo_target)")
+```
+
+```{r include=FALSE}
+gg_corr3 <- data_corr %>%
+  ggplot(aes(x = measurement, y = ml)) +
+  geom_point(alpha = 0.3, col = "#222225") +
+  xlim(1, 3) +
+  ylim(1, 3.5) +
+  geom_smooth(alpha = 0.2, col = "#3081b8", fill = "#74cbee") +
+  geom_abline(slope = 1, intercept = 0, col = "#cc2d2d") +
+  geom_label(
+    data = ci %>% filter(comparison == "mml"),
+    aes(label = label, x = x, y = y), parse = TRUE
+  ) +
+  xlab("log10(measurement)") +
+  ylab("log10(ml)")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+(gg_corr <- ggarrange(gg_corr1, gg_corr2, gg_corr3, ncol = 3) %>%
+  annotate_figure(
+    top = text_grob(
+      paste(
+        "Pairwise Correlation Between Model and Measurements for",
+        species_selected, "Pollen"
+      )
+    ),
+    bottom = text_grob("Pairwise correlation between Models; blue line shows the Loess smoother;
+      the red line shows a theoretical perfect correlation of 1. In the text box one can see the 95%
+      confidence intervals of the R-values (adjusted for multiple comparison)
+      as obtained by Pearson and two robust methods.",
+      face = "italic", size = 10
+    )
+  ))
+```
+
+## Altman Bland Plots
+
+The well established AB-method for clinical trials can be used here as well to compare the means and differences between datasets.
+If the points lie within the two SD-line for the differences the datasets can be assumed to be strongly associated with each other.
+
+```{r include=FALSE}
+sd_diff <- data_altman %>%
+  select(starts_with("diff")) %>%
+  summarise_all(~ sd(.)) %>%
+  pivot_longer(1:2, values_to = "sd", names_to = "dummy") %>%
+  pull(sd)
+
+gg_ab1 <- data_altman %>%
+  ggplot(aes(x = mean_cosmo_input, y = diff_cosmo_input)) +
+  geom_point(alpha = 0.2, col = "#222225") +
+  xlim(0, 500) +
+  ylim(-sd_diff[2] * 3, sd_diff[2] * 3) +
+  geom_abline(
+    slope = 0, intercept = 0, alpha = 0.8, col = "#cc2d2d"
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[1] * 1.96, alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[1] * (-1.96), alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_smooth(alpha = 0.3, col = "#3081b8", fill = "#74cbee") +
+  labs(y = "Difference(Baseline - Measurement)", x = "Mean(Baseline, Measurement)")
+```
+
+```{r include=FALSE}
+gg_ab2 <- data_altman %>%
+  ggplot(aes(x = mean_cosmo_target, y = diff_cosmo_target)) +
+  geom_point(alpha = 0.2, col = "#222225") +
+  xlim(0, 500) +
+  ylim(-sd_diff[2] * 3, sd_diff[2] * 3) +
+  geom_abline(
+    slope = 0, intercept = 0, alpha = 0.8, col = "#cc2d2d"
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[2] * 1.96, alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[2] * (-1.96), alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_smooth(alpha = 0.3, col = "#3081b8", fill = "#74cbee") +
+  labs(y = "Difference(Calibration - Measurement)", x = "Mean(Calibration, Measurement)")
+```
+
+
+```{r include=FALSE}
+gg_ab3 <- data_altman %>%
+  ggplot(aes(x = mean_ml, y = diff_ml)) +
+  geom_point(alpha = 0.2, col = "#222225") +
+  xlim(0, 500) +
+  ylim(-sd_diff[2] * 3, sd_diff[2] * 3) +
+  geom_abline(
+    slope = 0, intercept = 0, alpha = 0.8, col = "#cc2d2d"
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[2] * 1.96, alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_abline(
+    slope = 0, col = "#cc2d2d",
+    intercept = sd_diff[2] * (-1.96), alpha = 0.8, linetype = 3, linewidth = 1
+  ) +
+  geom_smooth(alpha = 0.3, col = "#3081b8", fill = "#74cbee") +
+  labs(y = "Difference(Calibration - Measurement)", x = "Mean(Calibration, Measurement)")
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+(gg_ab <- ggarrange(gg_ab1, gg_ab2, gg_ab3, ncol = 3) %>%
+  annotate_figure(
+    top = text_grob(paste(
+      "Bland-Altman Plots for",
+      species_selected, "Pollen"
+    )),
+    bottom = text_grob("Pairwise comparison of Models; blue line shows the Loess smother;
+      the red line shows a theoretical perfect agreement between Model and Measurements of zero.
+      The dashed red line shows the 2 * sd of the differences,
+      where we expect the points to lie within.",
+      face = "italic", size = 12
+    )
+  ))
+```
+
+## Density Plots
+
+These plots allow to observe the error for different concentration categories.
+
+```{r include=FALSE}
+categs <- c("weak", "medium", "strong", "verystrong")
+
+gg_conc_dens <- list()
+gg_conc_box <- list()
+
+labels_y <- list(0.2, 0.02, 0.0075, 0.002)
+labels_y_hist <- list(15, 13, 10, 10, 7.5, 3)
+xlims <- list(50, 500, 1000, 2000)
+
+names(labels_y) <- categs
+names(xlims) <- categs
+
+for (j in categs) {
+  obs <- data_impact_categories %>%
+    filter(categories_measurement == j) %>%
+    summarise(n()) %>%
+    pull()
+  obs <- paste("# of Observations:", obs)
+
+  gg_conc_dens[[j]] <- data_impact_categories %>%
+    filter(categories_measurement == j) %>%
+    pivot_longer(measurement:ml, names_to = "type", values_to = "Concentration") %>%
+    ggplot() +
+    # The area under that whole curve should be 1.
+    # To get an estimate of the probability of certain values,
+    # you'd have to integrate over an interval on your 'y' axis,
+    # and that value should never be greater than 1.
+    geom_density(aes(x = Concentration, col = type, fill = type), alpha = 0.15) +
+    annotate("text", x = xlims[[j]] * 0.6, y = labels_y[[j]], label = obs) +
+    scale_colour_manual("", values = col_hex) +
+    scale_fill_manual(values = col_hex) +
+    coord_cartesian(xlim = c(0, xlims[[j]])) +
+    guides(fill = "none") +
+    ggtitle(j)
+
+  gg_conc_box[[j]] <- data_impact_categories %>%
+    filter(categories_measurement == j) %>%
+    pivot_longer(measurement:ml, names_to = "type", values_to = "Concentration") %>%
+    mutate(type = factor(type, levels = c("measurement", "cosmo_input", "cosmo_target", "ml"))) %>%
+    ggplot() +
+    # The area under that whole curve should be 1.
+    # To get an estimate of the probability of certain values,
+    # you'd have to integrate over an interval on your 'y' axis,
+    # and that value should never be greater than 1.
+    geom_boxplot(aes(x = Concentration, col = type, fill = type), alpha = 0.15) +
+    scale_colour_manual("", values = col_hex) +
+    scale_fill_manual(values = col_hex) +
+    annotate("text", x = xlims[[j]] * 0.6, y = 0.35, label = obs) +
+    coord_cartesian(xlim = c(0, xlims[[j]])) +
+    guides(fill = "none") +
+    xlab("Concentration [Pollen / m³]") +
+    ylab("") +
+    ggtitle(j) +
+    theme(
+      axis.text.y = element_blank(),
+      axis.text.y.left = element_blank(), plot.margin = margin(1, 0, 0, 0, "cm")
+    )
+}
+```
+
+```{r echo=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+(gg_dens_conc <- ggarrange(plotlist = gg_conc_dens) %>%
+  annotate_figure(
+    top = paste0(
+      "Comparison of Measurements and Model Predictions for ", species_selected,
+      " Pollen for All Stations and Different Concentration Groups."
+    ),
+    bottom = text_grob(
+      paste0(
+        "We are looking at Density Kernel Estimators ",
+        "for all three timeseries to compare the measurements between them. ",
+        "\n The area under each curve adds up to 1 and makes it possible ",
+        "to visualise the (dis-)similarities of measurements from the ",
+        "three timeseries. \n It is basically a smoothed histogram. ",
+        "The buckets are based on the mean concentrations of measurements and model."
+      ),
+      face = "italic",
+      size = 10
+    )
+  ))
+```
+
+```{r echo=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+(gg_boxplot_conc <- ggarrange(
+  plotlist = gg_conc_box,
+  common.legend = TRUE, legend = "right", vjust = 5
+) %>%
+  annotate_figure(
+    top = text_grob(
+      paste(
+        "Model vs. Measurement Boxplot Comparison for Different Health Impact Groups for",
+        species_selected, "Pollen"
+      )
+    ),
+    bottom = text_grob(paste0("We are looking at Boxplots for different health impact groups to
+    investigate the differences between modeled and measured concentrations"),
+      face = "italic",
+      size = 10
+    )
+  ))
+```
+
+
+```{r echo=FALSE, fig.height = 8, fig.width = 13, fig.dpi=300, out.width="100%"}
+data_impact_categories %>%
+  mutate(
+    diff_cosmo_input = cosmo_input - measurement,
+    diff_cosmo_target = cosmo_target - measurement,
+    diff_ml = ml - measurement
+  ) %>%
+  pivot_longer(diff_cosmo_input:diff_ml) %>%
+  mutate(name = str_remove(name, "diff_")) %>%
+  ggplot() +
+  geom_boxplot(aes(x = categories_measurement, y = value, fill = name)) +
+  scale_fill_manual("", values = col_hex[2:4]) +
+  coord_cartesian(ylim = c(-500, 1000)) +
+  ggtitle(paste(
+    "Differences Between Modelled and Measured",
+    species_selected, "Pollen Concentrations"
+  )) +
+  xlab("") +
+  ylab("Concentration [Pollen / m³]") +
+  theme(legend.position = "bottom")
+```
+
+## Statistical Assessment
+
+First, various metrics are compared where the pollen concentrations are considered a continuous numerical variable.
+
+```{r echo=FALSE}
+metrics_cosmo_input <- data_above10 %>%
+  pivot_wider(names_from = type) %>%
+  filter(!is.na(cosmo_input)) %>%
+  mutate(
+    error = cosmo_input - measurement,
+  ) %>%
+  summarise(
+    R2 = cor(cosmo_input, measurement, method = "spearman", use = "complete.obs")^2,
+    Bias = mean(error),
+    SD = sd(error),
+    MAE = mean(abs(error)),
+    RMSE = sqrt(mean((error)^2)),
+    MSLE = mean((log10(1 + cosmo_input) - log10(1 + measurement))^2, na.rm = TRUE),
+    RMSLE = sqrt(MSLE)
+  ) %>%
+  mutate(type = "cosmo_input")
+
+metrics_cosmo_target <- data_above10 %>%
+  pivot_wider(names_from = type) %>%
+  filter(!is.na(cosmo_target)) %>%
+  mutate(
+    error = cosmo_target - measurement,
+  ) %>%
+  summarise(
+    R2 = cor(cosmo_target, measurement, method = "spearman", use = "complete.obs")^2,
+    Bias = mean(error),
+    SD = sd(error),
+    MAE = mean(abs(error)),
+    RMSE = sqrt(mean((error)^2)),
+    MSLE = mean((log10(1 + cosmo_target) - log10(1 + measurement))^2, na.rm = TRUE),
+    RMSLE = sqrt(MSLE)
+  ) %>%
+  mutate(type = "cosmo_target")
+
+metrics_ml <- data_above10 %>%
+  pivot_wider(names_from = type) %>%
+  filter(!is.na(ml)) %>%
+  mutate(
+    error = ml - measurement,
+  ) %>%
+  summarise(
+    R2 = cor(ml, measurement, method = "spearman", use = "complete.obs")^2,
+    Bias = mean(error),
+    SD = sd(error),
+    MAE = mean(abs(error)),
+    RMSE = sqrt(mean((error)^2)),
+    MSLE = mean((log10(1 + ml) - log10(1 + measurement))^2, na.rm = TRUE),
+    RMSLE = sqrt(MSLE)
+  ) %>%
+  mutate(type = "ml")
+
+my_header <- c(species_selected = 8)
+names(my_header) <- species_selected
+
+metrics_cosmo_input %>%
+  bind_rows(metrics_cosmo_target) %>%
+  bind_rows(metrics_ml) %>%
+  kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  add_header_above(my_header)
+```
+Second, the values will be converted into health impact based buckets.
+The impact classes have been defplotlistined https://service.meteoswiss.ch/confluence/x/1ZG4
+Now we can investigate various metrics that are typically used for categoric variables.
+The Kappa metric is explained here and was chosen as the most meaningful metric for this analysis:
+https://towardsdatascience.com/multi-class-metrics-made-simple-the-kappa-score-aka-cohens-kappa-coefficient-bdea137af09c
+
+```{r echo=FALSE}
+matrix_cosmo_input <- confusionMatrix(
+  data_impact_categories_above10$categories_cosmo_input,
+  data_impact_categories_above10$categories_measurement
+)
+kappa_cosmo_input <- matrix_cosmo_input$overall[1:2] %>%
+  tibble() %>%
+  mutate(
+    type = "cosmo_input",
+    metric = c("Accuracy", "Kappa")
+  )
+
+matrix_cosmo_target <- confusionMatrix(
+  data_impact_categories_above10$categories_cosmo_target,
+  data_impact_categories_above10$categories_measurement
+)
+kappa_cosmo_target <- matrix_cosmo_target$overall[1:2] %>%
+  tibble() %>%
+  mutate(
+    type = "cosmo_target",
+    metric = c("Accuracy", "Kappa")
+  )
+
+matrix_ml <- confusionMatrix(
+  data_impact_categories_above10$categories_ml,
+  data_impact_categories_above10$categories_measurement
+)
+kappa_ml <- matrix_ml$overall[1:2] %>%
+  tibble() %>%
+  mutate(
+    type = "ml",
+    metric = c("Accuracy", "Kappa")
+  )
+
+my_header <- c(seciesl_sel = 3)
+names(my_header) <- species_selected
+
+kappa_cosmo_input %>%
+  bind_rows(kappa_cosmo_target) %>%
+  bind_rows(kappa_ml) %>%
+  pivot_wider(names_from = metric, values_from = ".") %>%
+  kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  add_header_above(my_header)
+```
+
+To takes into account that the health impact levels are ordered.
+We can treat them as numerical values from 0:nothing - 4: very strong.
+
+
+```{r echo=FALSE}
+my_header <- c(seciesl_sel = 3)
+names(my_header) <- species_selected
+
+mae_category <- data_impact_categories_above10 %>%
+  select(
+    taxon, station, datetime,
+    categories_measurement, categories_cosmo_input, categories_cosmo_target, categories_ml
+  ) %>%
+  mutate(across(categories_measurement:categories_ml, ~ as.numeric(.x)),
+    error_cosmo_input = categories_cosmo_input - categories_measurement,
+    error_cosmo_target = categories_cosmo_target - categories_measurement,
+    error_ml = categories_ml - categories_measurement
+  ) %>%
+  summarize(
+    MAE_cosmo_input = mean(abs(error_cosmo_input)),
+    MAE_cosmo_target = mean(abs(error_cosmo_target)),
+    MAE_ml = mean(abs(error_ml))
+  )
+
+mae_category %>%
+  kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  add_header_above(my_header)
+```
+
+
+
+The following table could be used in the appendix.
+
+Reference Event No Event
+Predicted
+Event     A        B
+No Event  C        D
+The formulas used here are:
+
+- Sensitivity = A/(A+C)
+- Specificity = D/(B+D)
+- Prevalence = (A+C)/(A+B+C+D)
+- PPV = (sensitivity * prevalence)/((sensitivity*prevalence) + ((1-specificity)*(1-prevalence)))
+- NPV = (specificity * (1-prevalence))/(((1-sensitivity)*prevalence) + ((specificity)*(1-prevalence)))
+- Detection Rate = A/(A+B+C+D)
+- Detection Prevalence = (A+B)/(A+B+C+D)
+- Balanced Accuracy = (sensitivity+specificity)/2
+- Precision = A/(A+B)
+- Recall = A/(A+C)
+- F1 = (1+beta^2)*precision*recall/((beta^2 * precision)+recall)
+
+```{r echo=FALSE}
+my_header <- c(seciesl_sel = 13)
+names(my_header) <- species_selected
+
+matrix_cosmo_input$byClass %>%
+  as_tibble() %>%
+  mutate(
+    class = factor(rownames(matrix_cosmo_input$byClass),
+      ordered = TRUE,
+      levels = c(
+        "Class: nothing",
+        "Class: weak",
+        "Class: medium",
+        "Class: strong",
+        "Class: verystrong"
+      )
+    ),
+    type = "cory_alnu"
+  ) %>%
+  bind_rows(
+    matrix_cosmo_target$byClass %>%
+      as_tibble() %>%
+      mutate(
+        class = factor(rownames(matrix_cosmo_target$byClass),
+          ordered = TRUE,
+          levels = c(
+            "Class: nothing",
+            "Class: weak",
+            "Class: medium",
+            "Class: strong",
+            "Class: verystrong"
+          )
+        ),
+        type = "cosmo_target"
+      )
+  ) %>%
+  bind_rows(
+    matrix_ml$byClass %>%
+      as_tibble() %>%
+      mutate(
+        class = factor(rownames(matrix_ml$byClass),
+          ordered = TRUE,
+          levels = c(
+            "Class: nothing",
+            "Class: weak",
+            "Class: medium",
+            "Class: strong",
+            "Class: verystrong"
+          )
+        ),
+        type = "ml"
+      )
+  ) %>%
+  mutate(across(c(-class, -type), ~ round(., digits = 3))) %>%
+  arrange(class) %>%
+  filter(class != "Class: nothing") %>%
+  kable(escape = FALSE) %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  add_header_above(my_header)
+```
+
+## Robust Contrasts with Confidence Intervals
+
+https://www.researchgate.net/publication/282206980_nparcomp_An_R_Software_Package_for_Nonparametric_Multiple_Comparisons_and_Simultaneous_Confidence_Intervals
+The R package nparcomp implements a broad range of rank-based nonparametric methods for multiple comparisons.
+The single step procedures provide local test decisions in terms of multiplicity adjusted p-values and simultaneous conﬁdence intervals.
+The null hypothesis H0: p = 1/2 is significantly rejected at 5% level of significance for many pairwise comparisons.
+Whenever the p-Value is < than 5% = the confidence interval contains 0.5 -> the effect from the factor trap is not statistically meaningful.
+The Estimator can also be interpreted as a proxy for the relative difference in median between Model and Measurements.
+If the Estimator is > 0.5 then the model tends to have larger measurements.
+
+```{r echo=FALSE}
+npar_contr <-
+  nparcomp(
+    value ~ type,
+    data = data_above10,
+    conf.level = 0.95,
+    alternative = "two.sided",
+    type = "Dunnet",
+    control = "measurement"
+  )
+
+title <- paste(
+  "Robust Contrasts and Confidence Intervals for", species_selected, " Pollen Measurements"
+)
+myheader <- c(title = 6)
+names(myheader) <- title
+
+npar_contr$Analysis %>%
+  mutate(Taxon = species_selected) %>%
+  select(Taxon, Comparison, Estimator, Lower, Upper, pValue = p.Value) %>%
+  mutate(pValue = if_else(pValue < 0.05,
+    cell_spec(pValue, background = col_hex[3]),
+    cell_spec(pValue)
+  )) %>%
+  kable(escape = FALSE) %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  add_header_above(myheader)
+```
+
+FINAL DECISION:
+
+- Numeric
+  - Bias      max. +50%
+  - SD        max. +20%
+  - MAE       max. +20%
+  - RMSLE     max. +10%
+- Categorical
+  - Accuracy  max. -20%
+  - Kappa     max. -20%
+  - MAE       max. 20%
+
+
+```{r echo=FALSE, message=FALSE}
+decision_num <- metrics_cosmo_input %>%
+  bind_rows(metrics_ml) %>%
+  select(Bias, SD, MAE, RMSLE, type)
+
+change_num <- abs(metrics_ml %>% select(-type)) / abs(metrics_cosmo_input %>% select(-type)) - 1
+change_num %<>%
+  add_column("type" = "change") %>%
+  select(Bias, SD, MAE, RMSLE, type)
+
+kappa_cosmo_input %>%
+  bind_rows(kappa_ml) %>%
+  select("value" = ".", everything()) %>%
+  pivot_wider(names_from = "type") %>%
+  mutate(change = abs(ml / cosmo_input) - 1) %>%
+  bind_rows(
+    mae_category %>%
+      mutate(metric = "MAE_cat", change = abs(MAE_ml / MAE_cosmo_input) - 1) %>%
+      select(metric, cosmo_input = MAE_cosmo_input, ml = MAE_ml, change)
+  ) %>%
+  pivot_longer(2:4, names_to = "type") %>%
+  pivot_wider(names_from = metric) %>%
+  inner_join(
+    decision_num %>%
+      bind_rows(change_num)
+  ) %>%
+  mutate(across(2:8, round, 2)) %>%
+  mutate(
+    Accuracy = case_when(
+      Accuracy > 0.2 & type == "change" ~ cell_spec(Accuracy,
+        background = col_hex[3]
+      ),
+      Accuracy <= -0.2 & type == "change" ~ cell_spec(Accuracy,
+        background = col_hex[2]
+      ),
+      TRUE ~ cell_spec(Accuracy)
+    ),
+    Kappa = case_when(
+      Kappa > -0.2 & type == "change" ~ cell_spec(Kappa, background = col_hex[3]),
+      Kappa <= -0.2 & type == "change" ~ cell_spec(Kappa, background = col_hex[2]),
+      TRUE ~ cell_spec(Kappa)
+    ),
+    MAE_cat = case_when(
+      MAE_cat < 0.2 & type == "change" ~ cell_spec(MAE_cat, background = col_hex[3]),
+      MAE_cat >= 0.2 & type == "change" ~ cell_spec(MAE_cat, background = col_hex[2]),
+      TRUE ~ cell_spec(MAE_cat)
+    ),
+    Bias = case_when(
+      Bias < 0.5 & type == "change" ~ cell_spec(Bias, background = col_hex[3]),
+      Bias >= 0.5 & type == "change" ~ cell_spec(Bias, background = col_hex[2]),
+      TRUE ~ cell_spec(Bias)
+    ),
+    SD = case_when(
+      SD < 0.2 & type == "change" ~ cell_spec(SD, background = col_hex[3]),
+      SD >= 0.2 & type == "change" ~ cell_spec(SD, background = col_hex[2]),
+      TRUE ~ cell_spec(SD)
+    ),
+    MAE = case_when(
+      MAE < 0.2 & type == "change" ~ cell_spec(MAE, background = col_hex[3]),
+      MAE >= 0.2 & type == "change" ~ cell_spec(MAE, background = col_hex[2]),
+      TRUE ~ cell_spec(MAE)
+    ),
+    RMSLE = case_when(
+      RMSLE < 0.1 & type == "change" ~ cell_spec(RMSLE, background = col_hex[3]),
+      RMSLE >= 0.1 & type == "change" ~ cell_spec(RMSLE, background = col_hex[2]),
+      TRUE ~ cell_spec(RMSLE)
+    )
+  ) %>%
+  kable(escape = FALSE) %>%
+  kable_styling("striped", full_width = FALSE)
+```
+)

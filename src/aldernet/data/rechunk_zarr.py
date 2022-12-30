@@ -6,17 +6,19 @@ import xarray as xr
 
 # COMBINE ALL DATA
 
-# data_2022 = xr.open_zarr("/scratch/sadamov/aldernet/data2022")
-# data_2021 = xr.open_zarr("/scratch/sadamov/aldernet/data2021")
-# data_2020 = xr.open_zarr("/scratch/sadamov/aldernet/data2020")
+# data_2022 = xr.open_zarr("/scratch/sadamov/pyprojects_data/aldernet/data2022")
+# data_2021 = xr.open_zarr("/scratch/sadamov/pyprojects_data/aldernet/data2021")
+# data_2020 = xr.open_zarr("/scratch/sadamov/pyprojects_data/aldernet/data2020")
 
-# data_2020.to_zarr("/scratch/sadamov/aldernet/data")
-# data_2021.to_zarr("/scratch/sadamov/aldernet/data", mode="a", append_dim="valid_time")
-# data_2022.to_zarr("/scratch/sadamov/aldernet/data", mode="a", append_dim="valid_time")
+# data_2020.to_zarr("/scratch/sadamov/pyprojects_data/aldernet/data")
+# data_2021.to_zarr("/scratch/sadamov/pyprojects_data/aldernet/data",
+#    mode="a", append_dim="valid_time")
+# data_2022.to_zarr("/scratch/sadamov/pyprojects_data/aldernet/data",
+#    mode="a", append_dim="valid_time")
 
 # After this I had to manually remove the data variable "nominalTop"
 
-data = xr.open_zarr("/scratch/sadamov/aldernet/data")
+data = xr.open_zarr("/scratch/sadamov/pyprojects_data/aldernet/data")
 
 my_dict = dict(
     valid_time=data.valid_time.data,
@@ -70,7 +72,7 @@ data["HSURF"] = (
     .astype("float32")
 )
 
-new_fn = "/scratch/sadamov/aldernet/data.zarr"
+new_fn = "/scratch/sadamov/pyprojects_data/aldernet/data.zarr"
 for i, var in enumerate(data.data_vars):
     # clear zarr encoding
     data[var].encoding.clear()

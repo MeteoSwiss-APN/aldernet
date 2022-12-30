@@ -116,7 +116,15 @@ outputs/*
 images
 annotations
 oxford_segmentation.h5
-data/*
+data/cevio
+data/cosmo
+data/images_animals
+data/c1e*
+data/cosmo*
+data/images*
+data/*.nc
+data/*.diagnostic
+
 mlruns
 run__
 src/photocast_utils.py-jvsc*.ipynb
@@ -128,3 +136,6 @@ test.png
 src/test.py
 src/other_repos
 src/aldernet/sample*
+.lintr
+.Rprofile
+notebooks/analysis.html

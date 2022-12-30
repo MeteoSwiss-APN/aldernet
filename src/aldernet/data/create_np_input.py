@@ -8,7 +8,7 @@ import xarray as xr
 
 # Data Import
 # Import zarr archive for the years 2020-2022
-data = xr.open_zarr("/scratch/sadamov/aldernet/data.zarr")
+data = xr.open_zarr("/scratch/sadamov/pyprojects_data/aldernet/data.zarr")
 
 # Reduce spatial extent for faster training
 data_zoom = data.isel(y=slice(450, 514), x=slice(500, 628))
@@ -89,9 +89,23 @@ weather_valid = (
     .to_numpy()
 )
 
-np.save("/scratch/sadamov/aldernet/npy/small/hazel_train.npy", hazel_train)
-np.save("/scratch/sadamov/aldernet/npy/small/hazel_valid.npy", hazel_valid)
-np.save("/scratch/sadamov/aldernet/npy/small/alder_train.npy", alder_train)
-np.save("/scratch/sadamov/aldernet/npy/small/alder_valid.npy", alder_valid)
-np.save("/scratch/sadamov/aldernet/npy/small/weather_train.npy", weather_train)
-np.save("/scratch/sadamov/aldernet/npy/small/weather_valid.npy", weather_valid)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/hazel_train.npy", hazel_train
+)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/hazel_valid.npy", hazel_valid
+)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/alder_train.npy", alder_train
+)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/alder_valid.npy", alder_valid
+)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/weather_train.npy",
+    weather_train,
+)
+np.save(
+    "/scratch/sadamov/pyprojects_data/aldernet/npy/small/weather_valid.npy",
+    weather_valid,
+)
